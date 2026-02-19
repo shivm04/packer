@@ -45,6 +45,6 @@ build {
   sources = ["source.amazon-ebs.ubuntu"]
 
   provisioner "shell" {
-    script = "scripts/install.sh"
+    script = "packer/scripts/install.sh"
   }
 }
