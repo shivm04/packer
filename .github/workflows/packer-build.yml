@@ -7,50 +7,45 @@ on:
         description: "Enter AMI Version (example: v1.0.0)"
         required: true
         default: "v1.0.0"
-      terraform_action:
-        description: "Select Terraform Action"
+
+      action:
+        description: "Terraform Action"
         required: true
+        default: "apply"
         type: choice
         options:
           - plan
           - apply
           - destroy
-        default: plan
 
 jobs:
 
   # ===============================
-  # 1️⃣ PACKER JOB (SKIPPED IF DESTROY)
+  # 1️⃣ PACKER JOB (only for apply)
   # ===============================
   packer-build:
-    if: ${{ github.event.inputs.terraform_action != 'destroy' }}
+    if: github.event.inputs.action == 'apply'
     runs-on: ubuntu-latest
 
     outputs:
       ami_id: ${{ steps.extract.outputs.ami_id }}
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Setup Packer
-        uses: hashicorp/setup-packer@v3
+      - uses: hashicorp/setup-packer@v3
 
-      - name: Initialize Packer
-        run: packer init packer/
+      - run: packer init packer/
 
-      - name: Validate Packer Template
-        run: packer validate -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
+      - run: packer validate -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
 
-      - name: Build Custom AMI
-        run: packer build -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
+      - run: packer build -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
 
       - name: Extract AMI ID
         id: extract
@@ -60,8 +55,6 @@ jobs:
             --filters "Name=name,Values=custom-ubuntu-${{ github.event.inputs.ami_version }}" \
             --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
             --output text)
-
-          echo "AMI_ID=$AMI_ID"
           echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
 
 
@@ -69,38 +62,44 @@ jobs:
   # 2️⃣ TERRAFORM JOB
   # ===============================
   terraform-deploy:
-    needs: packer-build
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+    # 👇 Only depend on packer when APPLY
+    needs: [packer-build]
+    if: |
+      always() &&
+      (
+        github.event.inputs.action != 'apply' ||
+        needs.packer-build.result == 'success'
+      )
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init
         run: terraform init
         working-directory: terraform/
 
       - name: Terraform Plan
-        if: ${{ github.event.inputs.terraform_action == 'plan' }}
-        run: terraform plan -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
+        if: github.event.inputs.action == 'plan'
+        run: terraform plan
         working-directory: terraform/
 
       - name: Terraform Apply
-        if: ${{ github.event.inputs.terraform_action == 'apply' }}
-        run: terraform apply -auto-approve -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
+        if: github.event.inputs.action == 'apply'
+        run: terraform apply -auto-approve \
+          -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
         working-directory: terraform/
 
       - name: Terraform Destroy
-        if: ${{ github.event.inputs.terraform_action == 'destroy' }}
+        if: github.event.inputs.action == 'destroy'
         run: terraform destroy -auto-approve
         working-directory: terraform/
