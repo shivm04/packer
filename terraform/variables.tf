@@ -5,4 +5,6 @@ variable "region" {
 variable "ami_id" {
   description = "AMI ID from Packer"
   type        = string
+  default     = null
 }
+
