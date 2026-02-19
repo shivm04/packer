@@ -1,0 +1,45 @@
+name: Build Custom AMI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-ami:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ap-south-1
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+
+      - name: Generate AMI Version
+        id: version
+        run: echo "AMI_VERSION=$(date +'%Y.%m.%d.%H%M')" >> $GITHUB_ENV
+
+      - name: Initialize Packer
+        run: packer init packer/
+
+      - name: Validate Packer Template
+        run: packer validate -var "ami_version=${AMI_VERSION}" packer/
+
+      - name: Build AMI
+        run: packer build -var "ami_version=${AMI_VERSION}" packer/
