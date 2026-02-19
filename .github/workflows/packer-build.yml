@@ -2,50 +2,87 @@ name: Packer + Terraform Deployment
 
 on:
   workflow_dispatch:
+    inputs:
+      ami_version:
+        description: "Enter AMI Version (example: v1.0.0)"
+        required: true
+        default: "v1.0.0"
 
 jobs:
 
+  # ===============================
+  # 1️⃣ PACKER JOB
+  # ===============================
   packer-build:
     runs-on: ubuntu-latest
+
     outputs:
-      ami_id: ${{ steps.build.outputs.ami_id }}
+      ami_id: ${{ steps.extract.outputs.ami_id }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - uses: hashicorp/setup-packer@v3
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
 
-      - run: packer init packer/
+      - name: Verify Packer Version
+        run: packer version
 
-      - id: build
+      - name: Initialize Packer
+        run: packer init packer/
+
+      - name: Validate Packer Template
+        run: packer validate -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
+
+      - name: Build Custom AMI
+        run: packer build -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
+
+      # 🔥 Extract AMI ID using AWS CLI (Stable Method)
+      - name: Extract AMI ID
+        id: extract
         run: |
-          AMI_ID=$(packer build -machine-readable packer/ | \
-          awk -F, '/artifact,0,id/ {print $6}' | cut -d: -f2)
+          AMI_ID=$(aws ec2 describe-images \
+            --owners self \
+            --filters "Name=name,Values=custom-ubuntu-${{ github.event.inputs.ami_version }}" \
+            --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
+            --output text)
+          echo "AMI_ID=$AMI_ID"
           echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
 
+
+  # ===============================
+  # 2️⃣ TERRAFORM JOB
+  # ===============================
   terraform-deploy:
     needs: packer-build
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-      - run: terraform init
+      - name: Terraform Init
+        run: terraform init
         working-directory: terraform/
 
-      - run: terraform apply -auto-approve -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
         working-directory: terraform/
