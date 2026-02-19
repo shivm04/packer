@@ -7,13 +7,23 @@ on:
         description: "Enter AMI Version (example: v1.0.0)"
         required: true
         default: "v1.0.0"
+      terraform_action:
+        description: "Select Terraform Action"
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: plan
 
 jobs:
 
   # ===============================
-  # 1️⃣ PACKER JOB
+  # 1️⃣ PACKER JOB (SKIPPED IF DESTROY)
   # ===============================
   packer-build:
+    if: ${{ github.event.inputs.terraform_action != 'destroy' }}
     runs-on: ubuntu-latest
 
     outputs:
@@ -33,9 +43,6 @@ jobs:
       - name: Setup Packer
         uses: hashicorp/setup-packer@v3
 
-      - name: Verify Packer Version
-        run: packer version
-
       - name: Initialize Packer
         run: packer init packer/
 
@@ -45,7 +52,6 @@ jobs:
       - name: Build Custom AMI
         run: packer build -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
 
-      # 🔥 Extract AMI ID using AWS CLI (Stable Method)
       - name: Extract AMI ID
         id: extract
         run: |
@@ -54,6 +60,7 @@ jobs:
             --filters "Name=name,Values=custom-ubuntu-${{ github.event.inputs.ami_version }}" \
             --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
             --output text)
+
           echo "AMI_ID=$AMI_ID"
           echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
 
@@ -83,6 +90,17 @@ jobs:
         run: terraform init
         working-directory: terraform/
 
+      - name: Terraform Plan
+        if: ${{ github.event.inputs.terraform_action == 'plan' }}
+        run: terraform plan -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
+        working-directory: terraform/
+
       - name: Terraform Apply
+        if: ${{ github.event.inputs.terraform_action == 'apply' }}
         run: terraform apply -auto-approve -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
+        working-directory: terraform/
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.terraform_action == 'destroy' }}
+        run: terraform destroy -auto-approve
         working-directory: terraform/
