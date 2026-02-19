@@ -101,5 +101,6 @@ jobs:
 
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy'
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve \
+          -var="ami_id=dummy"
         working-directory: terraform/
