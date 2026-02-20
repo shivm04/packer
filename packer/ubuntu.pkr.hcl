@@ -7,6 +7,7 @@ packer {
   }
 }
 
+
 variable "aws_region" {
   type    = string
   default = "us-east-1"
@@ -16,12 +17,27 @@ variable "ami_version" {
   type = string
 }
 
+variable "vpc_id" {
+  type = string
+}
+
+variable "subnet_id" {
+  type = string
+}
+
+
 source "amazon-ebs" "ubuntu" {
-  region                  = var.aws_region
-  instance_type           = "t2.micro"
-  ssh_username            = "ubuntu"
-  ami_name                = "custom-ubuntu-${var.ami_version}"
-  ami_description         = "Custom Ubuntu AMI built via Packer"
+  region        = var.aws_region
+  instance_type = "t2.micro"
+  ssh_username  = "ubuntu"
+
+  ami_name        = "custom-ubuntu-${var.ami_version}"
+  ami_description = "Custom Ubuntu AMI built via Packer"
+
+  vpc_id    = var.vpc_id
+  subnet_id = var.subnet_id
+
+  associate_public_ip_address = true
 
   source_ami_filter {
     filters = {
