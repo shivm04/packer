@@ -1,7 +1,7 @@
 name: Packer + Terraform Deployment
 
 concurrency:
-  group: terraform
+  group: deploy
   cancel-in-progress: true
 
 on:
@@ -24,86 +24,121 @@ on:
 
 jobs:
 
-  # ===============================
-  # 1️⃣ PACKER JOB (only for apply)
-  # ===============================
-  packer-build:
+# ==================================================
+# 1️⃣ JOB: BUILD AMI (Only for APPLY)
+# ==================================================
+  build-ami:
     if: github.event.inputs.action == 'apply'
     runs-on: ubuntu-latest
 
     outputs:
-      ami_id: ${{ steps.extract.outputs.ami_id }}
+      ami_id: ${{ steps.get-ami.outputs.ami_id }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - uses: hashicorp/setup-packer@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-      - run: packer init packer/
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
 
-      - run: packer validate -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
+      # --------------------------
+      # Create Temp VPC
+      # --------------------------
+      - name: Terraform Init (Network)
+        working-directory: packer/ami-network
+        run: terraform init
 
-      - run: packer build -var "ami_version=${{ github.event.inputs.ami_version }}" packer/
+      - name: Terraform Apply (Create Temp VPC)
+        working-directory: packer/ami-network
+        run: terraform apply -auto-approve
 
-      - name: Extract AMI ID
-        id: extract
+      - name: Export VPC & Subnet IDs
         run: |
-          AMI_ID=$(aws ec2 describe-images \
-            --owners self \
-            --filters "Name=name,Values=custom-ubuntu-${{ github.event.inputs.ami_version }}" \
-            --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
-            --output text)
+          echo "VPC_ID=$(terraform -chdir=packer/ami-network output -raw vpc_id)" >> $GITHUB_ENV
+          echo "SUBNET_ID=$(terraform -chdir=packer/ami-network output -raw subnet_id)" >> $GITHUB_ENV
+
+      # --------------------------
+      # Build AMI
+      # --------------------------
+      - name: Packer Init
+        run: packer init packer/
+
+      - name: Packer Build
+        id: packer-build
+        run: |
+          packer build \
+          -var "ami_version=${{ github.event.inputs.ami_version }}" \
+          -var "vpc_id=$VPC_ID" \
+          -var "subnet_id=$SUBNET_ID" \
+          -machine-readable \
+          packer/ | tee packer.log
+
+      # Extract AMI ID from Packer log
+      - name: Extract AMI ID
+        id: get-ami
+        run: |
+          AMI_ID=$(grep 'artifact,0,id' packer.log | cut -d, -f6 | cut -d: -f2)
           echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+          echo "Created AMI: $AMI_ID"
+
+      # --------------------------
+      # Destroy Temp VPC
+      # --------------------------
+      - name: Destroy Temp VPC
+        if: always()
+        working-directory: packer/ami-network
+        run: terraform destroy -auto-approve
 
 
-  # ===============================
-  # 2️⃣ TERRAFORM JOB
-  # ===============================
-  terraform-deploy:
+# ==================================================
+# 2️⃣ JOB: DEPLOY INFRASTRUCTURE
+# ==================================================
+  deploy:
     runs-on: ubuntu-latest
-
-    # 👇 Only depend on packer when APPLY
-    needs: [packer-build]
-    if: |
-      always() &&
-      (
-        github.event.inputs.action != 'apply' ||
-        needs.packer-build.result == 'success'
-      )
+    needs: [build-ami]
+    if: always()
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init
+        working-directory: terraform
         run: terraform init
-        working-directory: terraform/
 
       - name: Terraform Plan
         if: github.event.inputs.action == 'plan'
+        working-directory: terraform
         run: terraform plan
-        working-directory: terraform/
 
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply'
-        run: terraform apply -auto-approve \
-          -var="ami_id=${{ needs.packer-build.outputs.ami_id }}"
-        working-directory: terraform/
+        working-directory: terraform
+        run: |
+          terraform apply -auto-approve \
+          -var "ami_id=${{ needs.build-ami.outputs.ami_id }}"
 
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy'
-        run: terraform destroy -auto-approve -input=false
-        working-directory: terraform/
+        working-directory: terraform
+        run: terraform destroy -auto-approve
