@@ -30,7 +30,7 @@ source "amazon-ebs" "ubuntu" {
   instance_type = "t2.micro"
   ssh_username  = "ubuntu"
 
-  ami_name = "custom-ubuntu-${var.ami_version}-${timestamp()}"
+  ami_name = "custom-ubuntu-${var.ami_version}-${formatdate("YYYYMMDDhhmmss", timestamp())}"
   ami_description = "Custom Ubuntu AMI built via Packer"
 
   vpc_id    = var.vpc_id
@@ -49,7 +49,7 @@ source "amazon-ebs" "ubuntu" {
   }
 
   tags = {
-    Name    = "custom-ubuntu-${var.ami_version}-${timestamp()}"
+    Name    = "custom-ubuntu-${var.ami_version}-${formatdate("YYYYMMDDhhmmss", timestamp())}"
     Version = var.ami_version
     BuiltBy = "Packer-GitHub-Actions"
   }
