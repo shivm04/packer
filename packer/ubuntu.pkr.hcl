@@ -25,13 +25,12 @@ variable "subnet_id" {
   type = string
 }
 
-
 source "amazon-ebs" "ubuntu" {
   region        = var.aws_region
   instance_type = "t2.micro"
   ssh_username  = "ubuntu"
 
-  ami_name        = "custom-ubuntu-${var.ami_version}"
+  ami_name = "custom-ubuntu-${var.ami_version}-${timestamp()}"
   ami_description = "Custom Ubuntu AMI built via Packer"
 
   vpc_id    = var.vpc_id
@@ -50,7 +49,7 @@ source "amazon-ebs" "ubuntu" {
   }
 
   tags = {
-    Name    = "custom-ubuntu-${var.ami_version}"
+    Name    = "custom-ubuntu-${var.ami_version}-${timestamp()}"
     Version = var.ami_version
     BuiltBy = "Packer-GitHub-Actions"
   }
