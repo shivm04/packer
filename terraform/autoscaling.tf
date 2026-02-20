@@ -1,6 +1,21 @@
+data "aws_ami" "latest_custom" {
+  most_recent = true
+  owners      = ["self"]
+
+  filter {
+    name   = "tag:BuiltBy"
+    values = ["Packer-GitHub-Actions"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+
 resource "aws_launch_template" "lt" {
   name_prefix   = "custom-lt-"
-  image_id      = var.ami_id
+  image_id      = data.aws_ami.latest_custom.id
   instance_type = "t2.micro"
 
   vpc_security_group_ids = [aws_security_group.web_sg.id]
