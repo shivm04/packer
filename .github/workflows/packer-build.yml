@@ -76,12 +76,15 @@ jobs:
       - name: Packer Build
         id: packer-build
         run: |
+          set -euo pipefail
+
           packer build \
-          -var "ami_version=${{ github.event.inputs.ami_version }}" \
-          -var "vpc_id=$VPC_ID" \
-          -var "subnet_id=$SUBNET_ID" \
-          -machine-readable \
-          packer/ | tee packer.log
+            -var "ami_version=${{ github.event.inputs.ami_version }}" \
+            -var "vpc_id=$VPC_ID" \
+            -var "subnet_id=$SUBNET_ID" \
+            -machine-readable \
+            packer/ | tee packer.log
+
 
       # Extract AMI ID from Packer log
       - name: Extract AMI ID
