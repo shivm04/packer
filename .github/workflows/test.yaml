@@ -1,137 +1,95 @@
-name: Deploy Chatbot (AWS)
+name: Deploy Chatbot
 
 on:
   workflow_dispatch:
     inputs:
       deploy_target:
-        description: Select deployment target
+        description: "What to deploy?"
         required: true
-        default: all
+        default: web
         type: choice
         options:
           - api
           - web
-          - all
-
-permissions:
-  contents: read
+          - both
 
 env:
   AWS_REGION: us-east-1
-  API_STACK_NAME: chatbot-api-sam
-  WEB_STACK_NAME: web-chatbot-stack
+  STACK_NAME: chatbot-web-stack   # <-- change to your stack name
 
 jobs:
 
-# =====================================================
-# API DEPLOYMENT
-# =====================================================
+# ======================
+# API DEPLOY
+# ======================
   deploy-api:
-    if: ${{ github.event.inputs.deploy_target == 'api' || github.event.inputs.deploy_target == 'all' }}
-    runs-on: [self-hosted, linux, x64]
-
-    outputs:
-      api_url: ${{ steps.geturl.outputs.api_url }}
+    if: github.event.inputs.deploy_target == 'api' || github.event.inputs.deploy_target == 'both'
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: SAM Deploy API
         run: |
-          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
-          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
-          aws configure set aws_session_token "$AWS_SESSION_TOKEN"
-          aws configure set region "${{ env.AWS_REGION }}"
-
-      - name: SAM Build
-        run: sam build
-
-      - name: SAM Deploy
-        run: |
-          sam deploy \
-            --stack-name ${{ env.API_STACK_NAME }} \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
-            --region "${{ env.AWS_REGION }}" \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset
-
-      - name: Get API URL
-        id: geturl
-        run: |
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.API_STACK_NAME }}" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-            --output text)
-
-          echo "api_url=$API_URL" >> $GITHUB_OUTPUT
+          sam build
+          sam deploy --no-confirm-changeset --no-fail-on-empty-changeset
 
 
-# =====================================================
-# WEB DEPLOYMENT
-# =====================================================
+# ======================
+# WEB DEPLOY
+# ======================
   deploy-web:
-    if: ${{ github.event.inputs.deploy_target == 'web' || github.event.inputs.deploy_target == 'all' }}
-    runs-on: [self-hosted, linux, x64]
-    needs: deploy-api
+    if: github.event.inputs.deploy_target == 'web' || github.event.inputs.deploy_target == 'both'
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-        run: |
-          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
-          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
-          aws configure set aws_session_token "$AWS_SESSION_TOKEN"
-          aws configure set region "${{ env.AWS_REGION }}"
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get Web Stack Outputs
+      # 🔥 AUTO FETCH OUTPUTS
+      - name: Get CloudFormation Outputs
         run: |
-          WEB_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.WEB_STACK_NAME }}" \
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name $STACK_NAME \
             --query "Stacks[0].Outputs[?OutputKey=='WebsiteBucket'].OutputValue" \
             --output text)
 
-          CF_DIST_ID=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.WEB_STACK_NAME }}" \
+          DIST_ID=$(aws cloudformation describe-stacks \
+            --stack-name $STACK_NAME \
             --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" \
             --output text)
 
-          echo "WEB_BUCKET=$WEB_BUCKET" >> $GITHUB_ENV
-          echo "CF_DIST_ID=$CF_DIST_ID" >> $GITHUB_ENV
+          echo "WEB_BUCKET=$BUCKET" >> $GITHUB_ENV
+          echo "CF_DIST_ID=$DIST_ID" >> $GITHUB_ENV
 
-      - name: Get API URL (fallback)
+      # Build static site
+      - name: Build web
         run: |
-          API_URL="${{ needs.deploy-api.outputs.api_url }}"
-
-          if [ -z "$API_URL" ]; then
-            API_URL=$(aws cloudformation describe-stacks \
-              --stack-name "${{ env.API_STACK_NAME }}" \
-              --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-              --output text)
-          fi
-
-          echo "API_URL=$API_URL" >> $GITHUB_ENV
-
-      - name: Build Web
-        run: |
-          mkdir -p web-dist
-          sed "s|__APIURL__|${{ env.API_URL }}|g" web/index.html > web-dist/index.html
+          mkdir web-dist
+          cp web/index.html web-dist/index.html
           cp web/styles.css web-dist/styles.css
 
+      # Upload automatically
       - name: Upload to S3
-        run: aws s3 sync web-dist "s3://${{ env.WEB_BUCKET }}" --delete
+        run: |
+          aws s3 sync web-dist s3://$WEB_BUCKET --delete
 
+      # Invalidate cache automatically
       - name: Invalidate CloudFront
         run: |
           aws cloudfront create-invalidation \
-            --distribution-id "${{ env.CF_DIST_ID }}" \
+            --distribution-id $CF_DIST_ID \
             --paths "/*"
