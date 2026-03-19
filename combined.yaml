@@ -1,0 +1,556 @@
+name: Continuous AHI QA Complete
+
+on:
+  push:
+    branches:
+      - '**'
+      - custom_ami
+
+permissions:
+  id-token: write
+  actions: read
+  contents: read
+
+env:
+  branch_name: ${{ github.ref_name }}
+  NuGetPackageSourceCredentials_SaaSArtifactory: Username=${{ secrets.SAAS_ARTIFACTORY_ID }};Password=${{ secrets.SAAS_ARTIFACTORY_ID_TOKEN }}
+  SAAS_ARTIFACTORY_ID: ${{ secrets.SAAS_ARTIFACTORY_ID }}
+  SAAS_ART_TOKEN_NONUSER: ${{ secrets.SAAS_ART_TOKEN_NONUSER }}
+  mailTo: "neelam_kumari@optum.com"
+  mailCc: ""
+  mailFrom: "OI_Clearance_DevOps@omail.o360.cloud"
+  ARTIFACTORY_USER: "rcmfo_clr_nousr@optum.com"
+  ARTIFACTORY_TOKEN: "${{ secrets.JFROG_TOKEN }}"
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+
+  # ─────────────────────────────────────────────
+  # JOB 1: AHI Build & Test
+  # ─────────────────────────────────────────────
+  build-and-test:
+    runs-on:
+      group: AHI_GHEC_WINDOWS
+      labels: ahiqa-build
+    steps:
+      - name: Enable long paths in Windows
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+
+      - name: Checkout rcmfo-AHI
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.branch_name }}
+
+      - name: Set up NuGet.Config for private feed (Windows)
+        run: ./scripts/generate-nuget-config.ps1
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          vs-version: '17'
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install NUnit Console Runner
+        run: |
+          nuget install NUnit.ConsoleRunner -Version 3.17.0 -Source https://api.nuget.org/v3/index.json -OutputDirectory .
+          dir
+
+      - name: Phase 2 Package Restore
+        run: nuget restore "Phase-II/AhiQA.Services.sln"
+
+      - name: Website Package Restore
+        run: nuget restore "Ahiqa.90.sln"
+
+      - name: Admin Tool Package Restore
+        run: nuget restore "ahiqaiat.sln"
+
+      - name: Ahi Services Package Restore
+        run: nuget restore "Monitor.90.sln"
+
+      - name: Build Phase II Services
+        run: msbuild "Phase-II/AhiQA.Services.sln" /p:Configuration=Release /t:Clean,Build
+
+      - name: Run Phase II Component Unit Tests
+        shell: cmd
+        run: |
+          NUnit.ConsoleRunner.3.17.0\tools\nunit3-console.exe "Phase-II/Tests/AhiQA.Services.Tests/bin/Release/AhiQA.Services.Tests.dll" --where "cat != Integration" --skipnontestassemblies
+
+      - name: Run Phase II Service Unit Tests
+        shell: cmd
+        run: |
+          NUnit.ConsoleRunner.3.17.0\tools\nunit3-console.exe "Phase-II/Tests/AhiQA.Services.Tests.Services/bin/Release/AhiQA.Services.Tests.Services.dll" --where "cat != Integration" --skipnontestassemblies
+
+      - name: Build Main Website
+        run: msbuild "Ahiqa.90.sln" /p:Configuration=Release /t:Clean,Build
+
+      - name: Run Main Website Tests
+        shell: cmd
+        run: |
+          NUnit.ConsoleRunner.3.17.0\tools\nunit3-console.exe "AHIQA3A.Tests/bin/Release/AHIQA3A.Tests.dll" --where "cat != Integration" --skipnontestassemblies
+
+      - name: Build Legacy Backend Services
+        run: msbuild "Monitor.90.sln" /p:Configuration=Release /t:Clean,Build
+
+      - name: Run AhiLogger Unit Tests
+        shell: cmd
+        run: |
+          NUnit.ConsoleRunner.3.17.0\tools\nunit3-console.exe "AhiLogger.Tests/bin/Release/AhiLogger.Tests.dll" --where "cat != Integration" --skipnontestassemblies
+
+      - name: Run Legacy Backend Services Tests
+        shell: cmd
+        run: |
+          NUnit.ConsoleRunner.3.17.0\tools\nunit3-console.exe "AHIQA.Services.Tests/AHIQA.Services.Tests/bin/Release/AHIQA.Services.Tests.dll" --where "cat != Integration" --skipnontestassemblies
+
+      - name: Run AhiQA API Tests
+        shell: cmd
+        run: |
+          NUnit.ConsoleRunner.3.17.0\tools\nunit3-console.exe "OwinSelfHost.Test/bin/Release/OwinSelfHost.Test.dll" --where "cat != Integration" --skipnontestassemblies
+
+      - name: Build Admin Tool Website
+        run: msbuild "ahiqaiat.sln" /p:Configuration=Release /t:Clean,Build
+
+      - name: Build Incident Report
+        run: msbuild "IncidentReporting/RiskManagement.sln" /p:Configuration=Release /t:Clean,Build
+
+      - name: Find and Execute DB Deployment Scripts
+        shell: powershell
+        run: |
+          $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+          $pinfo.FileName = "${{ github.workspace }}/Phase-II/tools/FindUpdateScripts/bin/Release/FindUpdateScripts.exe"
+          $pinfo.RedirectStandardError = $true
+          $pinfo.RedirectStandardOutput = $true
+          $pinfo.UseShellExecute = $false
+          $pinfo.WorkingDirectory = "${{ github.workspace }}/Phase-II/tools/FindUpdateScripts/bin/Release"
+          $pinfo.Arguments = "localhost"
+          $p = New-Object System.Diagnostics.Process
+          $p.StartInfo = $pinfo
+          $p.Start() | Out-Null
+          $stdout = $p.StandardOutput.ReadToEnd()
+          $stderr = $p.StandardError.ReadToEnd()
+          $p.WaitForExit()
+          Write-Host "stdout: $stdout"
+          Write-Host "stderr: $stderr"
+          Write-Host "exit code: $($p.ExitCode)"
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Packer Build AMI
+  # Runs after build-and-test succeeds
+  # ─────────────────────────────────────────────
+  packer-build-ami:
+    name: Build Server AMI
+    runs-on: [AIDE_0078290, rcmr, dev, v1.1.3, linux]
+    needs: build-and-test
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: 1.9.1
+
+      - name: Initialize Packer plugins
+        run: packer init custom_ami/packer/windows.pkr.hcl
+
+      - name: Set Packer variables for AMI type
+        id: set_vars
+        run: |
+          BUILD_SCRIPT_FILE="build.ps1"
+          BUILD_PARAMETER_STORE_PATH="/rcmfo/clearance/custom_ami/win_2022/build"
+          BUILD_AMI_NAME="Clearance Build custom ami"
+
+          echo "build_script_file=$BUILD_SCRIPT_FILE" >> $GITHUB_OUTPUT
+          echo "build_parameter_store_path=$BUILD_PARAMETER_STORE_PATH" >> $GITHUB_OUTPUT
+          echo "build_ami_name=$BUILD_AMI_NAME" >> $GITHUB_OUTPUT
+
+      - name: Fetch base AMI ID from SSM Parameter Store
+        id: fetch_base_ami
+        run: |
+          BASE_AMI_ID=$(aws ssm get-parameter --name "/nimbus/gold/windows/win2022" --query "Parameter.Value" --output text)
+          echo "base_ami_id=$BASE_AMI_ID" >> $GITHUB_OUTPUT
+
+      - name: Validate Packer template
+        run: |
+          packer validate \
+            -var "golden_ami=${{ steps.fetch_base_ami.outputs.base_ami_id }}" \
+            -var "kms_key_id=${{ secrets.KMS_KEY_ID_ARN }}" \
+            -var-file=custom_ami/packer/variables.auto.pkrvars.hcl \
+            -var "artifactory_token=${{ secrets.JFROG_TOKEN }}" \
+            -var "powershell_script=${{ steps.set_vars.outputs.build_script_file }}" \
+            -var "parameter_store_name=${{ steps.set_vars.outputs.build_parameter_store_path }}" \
+            -var "ami_name=${{ steps.set_vars.outputs.build_ami_name }}" \
+            custom_ami/packer/windows.pkr.hcl
+
+      - name: Build Packer image
+        run: |
+          packer build \
+            -var "golden_ami=${{ steps.fetch_base_ami.outputs.base_ami_id }}" \
+            -var "kms_key_id=${{ secrets.KMS_KEY_ID_ARN }}" \
+            -var "artifactory_token=${{ secrets.JFROG_TOKEN }}" \
+            -var "powershell_script=${{ steps.set_vars.outputs.build_script_file }}" \
+            -var "parameter_store_name=${{ steps.set_vars.outputs.build_parameter_store_path }}" \
+            -var-file=custom_ami/packer/variables.auto.pkrvars.hcl \
+            -var "ami_name=${{ steps.set_vars.outputs.build_ami_name }}" \
+            custom_ami/packer/windows.pkr.hcl
+
+      - name: Capture + Share Build AMI details
+        id: build_ami_share
+        shell: bash
+        run: |
+          set -u
+          REGION="us-east-1"
+          GOLDEN_AMI_ID="${{ steps.fetch_base_ami.outputs.base_ami_id }}"
+          BUILD_AMI_PARAMETER_NAME="${{ steps.set_vars.outputs.build_parameter_store_path }}"
+
+          if [ ! -f packer-manifest.json ]; then
+            echo "ERROR: packer-manifest.json not found."
+            exit 1
+          fi
+
+          BUILD_AMI_ID=$(jq -r '.builds[0].artifact_id' packer-manifest.json | awk -F: '{print $2}')
+          if [ -z "$BUILD_AMI_ID" ] || [ "$BUILD_AMI_ID" = "null" ]; then
+            echo "ERROR: Could not extract AMI ID from manifest"
+            cat packer-manifest.json || true
+            exit 1
+          fi
+
+          BUILD_AMI_NAME=$(aws ec2 describe-images \
+            --region "$REGION" \
+            --image-ids "$BUILD_AMI_ID" \
+            --query "Images[0].Tags[?Key=='NAME'].Value | [0]" \
+            --output text)
+
+          CLR_QA="339713050038"
+          AHI_DEV="339713174762"
+          AHI_QA="211125320961"
+          results_json="[]"
+
+          share_one () {
+            local label="$1"
+            local acct="$2"
+            aws ec2 modify-image-attribute \
+              --region "$REGION" \
+              --image-id "$BUILD_AMI_ID" \
+              --launch-permission "Add=[{UserId=$acct}]" >/dev/null 2>&1
+            if [ $? -eq 0 ]; then status="✅ Shared"; else status="❌ Failed"; fi
+            results_json=$(jq -c \
+              --arg target "$label" \
+              --arg account_id "$acct" \
+              --arg status "$status" \
+              '. + [{target:$target, account_id:$account_id, status:$status}]' \
+              <<<"$results_json")
+          }
+
+          share_one "CLR QA"  "$CLR_QA"
+          share_one "AHI DEV" "$AHI_DEV"
+          share_one "AHI QA"  "$AHI_QA"
+
+          jq -n -c \
+            --arg region "$REGION" \
+            --arg golden_ami_id "$GOLDEN_AMI_ID" \
+            --arg ami_type "Build" \
+            --arg ami_id "$BUILD_AMI_ID" \
+            --arg ami_name "$BUILD_AMI_NAME" \
+            --arg parameter_name "$BUILD_AMI_PARAMETER_NAME" \
+            --argjson shares "$results_json" \
+            '{
+              region: $region,
+              golden_ami_id: $golden_ami_id,
+              ami_type: $ami_type,
+              custom_ami_id: $ami_id,
+              custom_ami_name: $ami_name,
+              parameter_name: $parameter_name,
+              shares: $shares
+            }' > build-ami-details.json
+
+      - name: Upload build AMI details
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-ami-details
+          path: build-ami-details.json
+
+  # ─────────────────────────────────────────────
+  # JOB 3: Packer Deploy AMI
+  # Runs after build-and-test succeeds (parallel with packer-build-ami)
+  # ─────────────────────────────────────────────
+  packer-deploy-ami:
+    name: Deploy Server AMI
+    runs-on: [AIDE_0078290, rcmr, dev, v1.1.3, linux]
+    needs: build-and-test
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: 1.9.1
+
+      - name: Initialize Packer plugins
+        run: packer init custom_ami/packer/windows.pkr.hcl
+
+      - name: Set Packer variables for AMI type
+        id: set_vars
+        run: |
+          DEPLOY_SCRIPT_FILE="deploy.ps1"
+          DEPLOY_PARAMETER_STORE_PATH="/rcmfo/clearance/custom_ami/win_2022/deploy"
+          DEPLOY_AMI_NAME="Clearance Deploy custom ami"
+
+          echo "deploy_script_file=$DEPLOY_SCRIPT_FILE" >> $GITHUB_OUTPUT
+          echo "deploy_parameter_store_path=$DEPLOY_PARAMETER_STORE_PATH" >> $GITHUB_OUTPUT
+          echo "deploy_ami_name=$DEPLOY_AMI_NAME" >> $GITHUB_OUTPUT
+
+      - name: Fetch base AMI ID from SSM Parameter Store
+        id: fetch_base_ami
+        run: |
+          BASE_AMI_ID=$(aws ssm get-parameter --name "/nimbus/gold/windows/win2022" --query "Parameter.Value" --output text)
+          echo "base_ami_id=$BASE_AMI_ID" >> $GITHUB_OUTPUT
+
+      - name: Validate Packer template
+        run: |
+          packer validate \
+            -var "golden_ami=${{ steps.fetch_base_ami.outputs.base_ami_id }}" \
+            -var "kms_key_id=${{ secrets.KMS_KEY_ID_ARN }}" \
+            -var-file=custom_ami/packer/variables.auto.pkrvars.hcl \
+            -var "artifactory_token=${{ secrets.JFROG_TOKEN }}" \
+            -var "powershell_script=${{ steps.set_vars.outputs.deploy_script_file }}" \
+            -var "parameter_store_name=${{ steps.set_vars.outputs.deploy_parameter_store_path }}" \
+            -var "ami_name=${{ steps.set_vars.outputs.deploy_ami_name }}" \
+            -var "disk_size=100" \
+            custom_ami/packer/windows.pkr.hcl
+
+      - name: Build Packer Deploy server image
+        run: |
+          packer build \
+            -var "golden_ami=${{ steps.fetch_base_ami.outputs.base_ami_id }}" \
+            -var "kms_key_id=${{ secrets.KMS_KEY_ID_ARN }}" \
+            -var "artifactory_token=${{ secrets.JFROG_TOKEN }}" \
+            -var "powershell_script=${{ steps.set_vars.outputs.deploy_script_file }}" \
+            -var "parameter_store_name=${{ steps.set_vars.outputs.deploy_parameter_store_path }}" \
+            -var-file=custom_ami/packer/variables.auto.pkrvars.hcl \
+            -var "ami_name=${{ steps.set_vars.outputs.deploy_ami_name }}" \
+            -var "disk_size=100" \
+            custom_ami/packer/windows.pkr.hcl
+
+      - name: Capture + Share Deploy AMI details
+        id: deploy_ami_share
+        shell: bash
+        run: |
+          set -u
+          REGION="us-east-1"
+          GOLDEN_AMI_ID="${{ steps.fetch_base_ami.outputs.base_ami_id }}"
+          DEPLOY_AMI_PARAMETER_NAME="${{ steps.set_vars.outputs.deploy_parameter_store_path }}"
+
+          if [ ! -f packer-manifest.json ]; then
+            echo "ERROR: packer-manifest.json not found."
+            exit 1
+          fi
+
+          DEPLOY_AMI_ID=$(jq -r '.builds[0].artifact_id' packer-manifest.json | awk -F: '{print $2}')
+          if [ -z "$DEPLOY_AMI_ID" ] || [ "$DEPLOY_AMI_ID" = "null" ]; then
+            echo "ERROR: Could not extract AMI ID from manifest"
+            cat packer-manifest.json || true
+            exit 1
+          fi
+
+          DEPLOY_AMI_NAME="${{ steps.set_vars.outputs.deploy_ami_name }}"
+
+          CLR_QA="339713050038"
+          AHI_DEV="339713174762"
+          AHI_QA="211125320961"
+          results_json="[]"
+
+          share_one () {
+            local label="$1"
+            local acct="$2"
+            aws ec2 modify-image-attribute \
+              --region "$REGION" \
+              --image-id "$DEPLOY_AMI_ID" \
+              --launch-permission "Add=[{UserId=$acct}]" >/dev/null 2>&1
+            if [ $? -eq 0 ]; then status="✅ Shared"; else status="❌ Failed"; fi
+            results_json=$(jq -c \
+              --arg target "$label" \
+              --arg account_id "$acct" \
+              --arg status "$status" \
+              '. + [{target:$target, account_id:$account_id, status:$status}]' \
+              <<<"$results_json")
+          }
+
+          share_one "CLR QA"  "$CLR_QA"
+          share_one "AHI DEV" "$AHI_DEV"
+          share_one "AHI QA"  "$AHI_QA"
+
+          jq -n -c \
+            --arg region "$REGION" \
+            --arg golden_ami_id "$GOLDEN_AMI_ID" \
+            --arg ami_type "Deploy" \
+            --arg ami_id "$DEPLOY_AMI_ID" \
+            --arg ami_name "$DEPLOY_AMI_NAME" \
+            --arg parameter_name "$DEPLOY_AMI_PARAMETER_NAME" \
+            --argjson shares "$results_json" \
+            '{
+              region: $region,
+              golden_ami_id: $golden_ami_id,
+              ami_type: $ami_type,
+              custom_ami_id: $ami_id,
+              custom_ami_name: $ami_name,
+              parameter_name: $parameter_name,
+              shares: $shares
+            }' > deploy-ami-details.json
+
+      - name: Upload deploy AMI details
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-ami-details
+          path: deploy-ami-details.json
+
+  # ─────────────────────────────────────────────
+  # JOB 4: Clearance QA — Encrypt + Tag AMIs
+  # Runs after both Packer jobs succeed
+  # ─────────────────────────────────────────────
+  clearance-qa:
+    name: Encrypt with QA KMS Key & Tag AMIs in CLR QA (339713050038)
+    runs-on: [AIDE_0078290, rcmr, qa, v1.1.3, linux]
+    needs:
+      - packer-build-ami
+      - packer-deploy-ami
+    steps:
+      - name: Download build AMI details
+        uses: actions/download-artifact@v4
+        with:
+          name: build-ami-details
+          path: artifacts/build
+
+      - name: Download deploy AMI details
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-ami-details
+          path: artifacts/deploy
+
+      - name: Extract AMI IDs
+        id: ami_ids
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_AMI_ID=$(jq -r '.custom_ami_id' artifacts/build/build-ami-details.json)
+          DEPLOY_AMI_ID=$(jq -r '.custom_ami_id' artifacts/deploy/deploy-ami-details.json)
+          BASE_AMI_ID=$(jq -r '.golden_ami_id' artifacts/build/build-ami-details.json)
+
+          echo "build_ami_id=$BUILD_AMI_ID" >> "$GITHUB_OUTPUT"
+          echo "deploy_ami_id=$DEPLOY_AMI_ID" >> "$GITHUB_OUTPUT"
+          echo "base_ami_id=$BASE_AMI_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Copy Build and Deploy AMIs in CLR QA with destination KMS key
+        id: copy_amis_clr_qa
+        shell: bash
+        env:
+          DEST_KMS_KEY_ID: ${{ secrets.CLR_QA_KMS_KEY_ID }}
+        run: |
+          set -euo pipefail
+          REGION="us-east-1"
+
+          echo "Copying Build AMI ${{ steps.ami_ids.outputs.build_ami_id }} into CLR QA..."
+          NEW_BUILD_AMI_ID=$(aws ec2 copy-image \
+            --region "$REGION" \
+            --source-region "$REGION" \
+            --source-image-id "${{ steps.ami_ids.outputs.build_ami_id }}" \
+            --name "Copied-Build-AMI-in-CLR-QA" \
+            --description "Copy of shared Build AMI re-encrypted with CLR QA KMS" \
+            --encrypted \
+            --kms-key-id "$DEST_KMS_KEY_ID" \
+            --query 'ImageId' \
+            --output text)
+
+          echo "Copying Deploy AMI ${{ steps.ami_ids.outputs.deploy_ami_id }} into CLR QA..."
+          NEW_DEPLOY_AMI_ID=$(aws ec2 copy-image \
+            --region "$REGION" \
+            --source-region "$REGION" \
+            --source-image-id "${{ steps.ami_ids.outputs.deploy_ami_id }}" \
+            --name "Copied-Deploy-AMI-in-CLR-QA" \
+            --description "Copy of shared Deploy AMI re-encrypted with CLR QA KMS" \
+            --encrypted \
+            --kms-key-id "$DEST_KMS_KEY_ID" \
+            --query 'ImageId' \
+            --output text)
+
+          echo "New Build AMI in CLR QA: $NEW_BUILD_AMI_ID"
+          echo "New Deploy AMI in CLR QA: $NEW_DEPLOY_AMI_ID"
+          echo "new_build_ami_id=$NEW_BUILD_AMI_ID" >> "$GITHUB_OUTPUT"
+          echo "new_deploy_ami_id=$NEW_DEPLOY_AMI_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for copied AMIs to become available
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -u
+          aws ec2 wait image-available \
+            --region us-east-1 \
+            --image-ids "${{ steps.copy_amis_clr_qa.outputs.new_build_ami_id }}" "${{ steps.copy_amis_clr_qa.outputs.new_deploy_ami_id }}" \
+            --max-attempts 120 \
+            --delay 30 \
+          || echo "WARN: AMI(s) not available yet; proceeding to tagging step (best-effort)."
+
+      - name: Tag copied Build and Deploy AMIs in CLR QA
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -u
+          REGION="us-east-1"
+          BUILD_ID="${{ steps.copy_amis_clr_qa.outputs.new_build_ami_id }}"
+          DEPLOY_ID="${{ steps.copy_amis_clr_qa.outputs.new_deploy_ami_id }}"
+
+          echo "Tagging copied AMIs (best-effort): $BUILD_ID $DEPLOY_ID"
+          set +e
+          tagged=0
+          for i in $(seq 1 30); do
+            aws ec2 create-tags \
+              --region "$REGION" \
+              --resources "$BUILD_ID" "$DEPLOY_ID" \
+              --tags \
+                Key=STAGE,Value=qa \
+                Key=TEAM,Value=rcmfo \
+                Key=APP_ID,Value=1800 \
+                Key=COST_CENTER,Value=30067 \
+                Key=STORAGE_ENCRYPTED,Value=yes \
+                Key=source_ami,Value="${{ steps.ami_ids.outputs.base_ami_id }}" \
+                Key=approved,Value=true
+
+            if [ $? -eq 0 ]; then
+              tagged=1
+              echo "Tags applied successfully."
+              break
+            fi
+            echo "Tagging attempt $i failed; retrying in 20s..."
+            sleep 20
+          done
+
+          if [ "$tagged" -ne 1 ]; then
+            echo "WARN: Failed to tag AMIs after retries; leaving job successful (best-effort)."
+          fi
+          exit 0
+
+      - name: Write CLR QA AMI details artifact
+        shell: bash
+        run: |
+          set -e
+          cat > clr-qa-ami-details.json <<EOF
+          {
+            "account_label": "CLR QA",
+            "account_id": "339713050038",
+            "new_build_ami_id": "${{ steps.copy_amis_clr_qa.outputs.new_build_ami_id }}",
+            "new_deploy_ami_id": "${{ steps.copy_amis_clr_qa.outputs.new_deploy_ami_id }}"
+          }
+          EOF
+
+      - name: Upload CLR QA AMI details
+        uses: actions/upload-artifact@v4
+        with:
+          name: clr-qa-ami-details
+          path: clr-qa-ami-details.json
